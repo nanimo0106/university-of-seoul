@@ -1,0 +1,1408 @@
+//----------------------------------------------
+// BCD to 7-Segment module
+// --------------------------------------------
+module seg_decoder(bcd, seg_data);
+    input [3:0] bcd;
+    output [7:0] seg_data;
+    reg [7:0] seg_data;
+    
+    always @(bcd) begin
+        case(bcd)
+            4'h0 : seg_data = 8'b1111_1100; // 0
+            4'h1 : seg_data = 8'b0110_0000; // 1
+            4'h2 : seg_data = 8'b1101_1010; // 2
+            4'h3 : seg_data = 8'b1111_0010; // 3
+            4'h4 : seg_data = 8'b0110_0110; // 4
+            4'h5 : seg_data = 8'b1011_0110; // 5
+            4'h6 : seg_data = 8'b1011_1110; // 6
+            4'h7 : seg_data = 8'b1110_0000; // 7
+            4'h8 : seg_data = 8'b1111_1110; // 8
+            4'h9 : seg_data = 8'b1111_0110; // 9
+            4'ha : seg_data = 8'b1110_1110; // A 
+            4'hb : seg_data = 8'b0011_1110; // b
+            4'hc : seg_data = 8'b1001_1100; // C
+            4'hd : seg_data = 8'b0111_1010; // d
+            4'he : seg_data = 8'b1001_1110; // E
+            4'hf : seg_data = 8'b1000_1110; // F
+            default: seg_data = 8'b0000_0000; // default
+        endcase
+    end
+endmodule
+
+// --------------------------------------------
+// Piezo module (1MHz 클럭 기준)
+// 알람이 활성화되면 "솔솔라라솔솔미미솔솔미미레" 멜로디 재생 (5초정도 재생)
+// --------------------------------------------
+module piezo_alarm(
+    input clk_1mhz,         // 1 MHz 클럭
+    input rst,              
+    input enable,           // 알람 활성화 신호
+    output reg piezo        // Piezo 신호
+);
+    
+    parameter DO = 12'd1912;  // C4 
+    parameter RE = 12'd1703;  // D4 
+    parameter MI = 12'd1517;  // E4
+    parameter FA = 12'd1432;  // F4 
+    parameter SOL = 12'd1275;  // G4 
+    parameter LA = 12'd1136;  // A4
+    parameter SI = 12'd1012;  // B4
+    
+    // 멜로디: 솔솔라라솔솔미미솔솔미미레(13개 음) => 학교종이 땡땡땡
+    reg [3:0] note_index;     // 현재 출력중인 음표의 index
+    reg [11:0] cnt;           // Piezo 카운터
+    reg [11:0] cnt_limit;     // 현재 음의 주파수
+    reg [18:0] note_duration; // 각 음의 재생 지속시간 카운터 (385ms)
+    reg playing;              // 멜로디 재생 중인거 알기위한 위한 값
+    
+    // 현재 음표에 따른 주파수 설정
+    always @(*) begin
+        if (playing) begin
+            case (note_index)
+                4'd0: cnt_limit = SOL;  // 솔
+                4'd1: cnt_limit = SOL;  // 솔
+                4'd2: cnt_limit = LA;   // 라
+                4'd3: cnt_limit = LA;   // 라
+                4'd4: cnt_limit = SOL;  // 솔
+                4'd5: cnt_limit = SOL;  // 솔
+                4'd6: cnt_limit = MI;   // 미
+                4'd7: cnt_limit = MI;   // 미
+                4'd8: cnt_limit = SOL;  // 솔
+                4'd9: cnt_limit = SOL;  // 솔
+                4'd10: cnt_limit = MI;   // 미
+                4'd11: cnt_limit = MI;   // 미
+                4'd12: cnt_limit = RE;   // 레
+                default: cnt_limit = 12'd0;
+            endcase
+        end
+        else
+            cnt_limit = 12'd0;
+    end
+    
+    // 음악 재생 제어를 위한 코드
+    always @(posedge clk_1mhz or posedge rst) begin
+        if (rst) begin
+            note_index <= 4'd0;
+            note_duration <= 19'd0;
+            playing <= 1'b0;
+        end
+        else begin
+            if (enable && !playing) begin
+                // 알람 시작
+                playing <= 1'b1;
+                note_index <= 4'd0;
+                note_duration <= 19'd0;
+            end
+            else if (playing) begin
+                if (note_duration >= 19'd385000) begin  // 385ms 이후
+                    note_duration <= 19'd0;
+                    if (note_index >= 4'd12) begin
+                        // 멜로디 종료
+                        playing <= 1'b0;
+                        note_index <= 4'd0;
+                    end
+                    else begin
+                        // 다음 음표로
+                        note_index <= note_index + 4'd1;
+                    end
+                end
+                else begin
+                    note_duration <= note_duration + 19'd1;
+                end
+            end
+            else if (!enable) begin
+                // enable이 꺼지면 초기화
+                playing <= 1'b0;
+                note_index <= 4'd0;
+                note_duration <= 19'd0;
+            end
+        end
+    end
+    
+    // Piezo 음생성을 위한 코드
+    always @(posedge clk_1mhz or posedge rst) begin
+        if (rst) begin
+            cnt <= 12'd0;
+            piezo <= 1'b0;
+        end
+        else if (cnt_limit != 12'd0) begin
+            if (cnt >= cnt_limit / 2) begin
+                piezo <= ~piezo;
+                cnt <= 12'd0;
+            end
+            else
+                cnt <= cnt + 12'd1;
+        end
+        else begin
+            cnt <= 12'd0;
+            piezo <= 1'b0;
+        end
+    end
+endmodule
+
+
+// --------------------------------------------
+// 모드명, 도시 이름 및 날짜를 LCD에 표시하는 Controller
+// LCD 첫째 줄: 모드 상태(어떤 모드에 있는지), 도시 이름(모드에서 도시이름 설정할 때)
+// LCD 둘째 줄: 오늘의 날짜 (YYYY/MM/DD가 표시되게)
+// --------------------------------------------
+module city_date_lcd_controller(
+    input rst,
+    input clk,
+    input [2:0] mode,           // 현재 모드
+    input [3:0] city_code,      // 도시 코드
+    input [11:0] year,          // 년도
+    input [4:0] month,          // 월
+    input [5:0] day,            // 일
+
+    output LCD_E,
+    output reg LCD_RS,
+    output reg LCD_RW,
+    output reg [7:0] LCD_DATA
+);
+
+    assign LCD_E = clk;
+
+    reg [7:0] cnt;
+    reg [2:0] state;
+    
+    // 모드 값들 (watch 모듈에 있는 값과 똑같이 정의함)
+    localparam MODE_NORMAL = 3'd0;
+    localparam MODE_SET_HOUR = 3'd1;
+    localparam MODE_SET_MIN = 3'd2;
+    localparam MODE_SET_ZONE = 3'd3;
+    localparam MODE_TIMER = 3'd4;
+    localparam MODE_POMODORO = 3'd5;
+    localparam MODE_POMO_SET_WORK = 3'd6;
+    localparam MODE_POMO_SET_REST = 3'd7;
+    
+    // lCD에 표현하기 위해 날짜를 BCD로 변환할때 사용하는 값
+    reg [3:0] year_thou, year_hun, year_ten, year_one;
+    reg [3:0] month_ten, month_one;
+    reg [3:0] day_ten, day_one;
+    
+    always @(*) begin //이 block 이 bin2BCD 역할을 수행
+        year_thou = (year / 1000) % 10;
+        year_hun = (year / 100) % 10;
+        year_ten = (year / 10) % 10;
+        year_one = year % 10;
+        month_ten = month / 10;
+        month_one = month % 10;
+        day_ten = day / 10;
+        day_one = day % 10;
+    end
+
+    localparam DELAY = 3'd0,
+               FUNCTION_SET = 3'd1,
+               DISP_ONOFF = 3'd2,
+               ENTRY_MODE = 3'd3,
+               SET_ADDRESS = 3'd4,
+               DELAY_T = 3'd5,
+               WRITE = 3'd6;
+
+    // state machine
+    always @(posedge clk or negedge rst) begin
+        if (!rst) begin
+            state <= DELAY;
+        end else begin
+            case (state)
+                DELAY: if (cnt == 8'd70)  state <= FUNCTION_SET;
+                FUNCTION_SET: if (cnt == 8'd30) state <= DISP_ONOFF;
+                DISP_ONOFF: if (cnt == 8'd30) state <= ENTRY_MODE;
+                ENTRY_MODE: if (cnt == 8'd30) state <= SET_ADDRESS;
+                SET_ADDRESS: if (cnt == 8'd100) state <= DELAY_T;
+                DELAY_T: state <= WRITE;
+                WRITE: if (cnt == 8'd50) state <= DELAY_T;
+                default: state <= DELAY;
+            endcase
+        end
+    end
+
+    // 카운터
+    always @(posedge clk or negedge rst) begin
+        if (!rst)
+            cnt <= 8'd0;
+        else begin
+            case (state)
+                DELAY: cnt <= (cnt >= 8'd70) ? 8'd0 : cnt + 8'd1;
+                FUNCTION_SET: cnt <= (cnt >= 8'd30) ? 8'd0 : cnt + 8'd1;
+                DISP_ONOFF: cnt <= (cnt >= 8'd30) ? 8'd0 : cnt + 8'd1;
+                ENTRY_MODE: cnt <= (cnt >= 8'd30) ? 8'd0 : cnt + 8'd1;
+                SET_ADDRESS: cnt <= (cnt >= 8'd100) ? 8'd0 : cnt + 8'd1;
+                DELAY_T: cnt <= 8'd0;
+                WRITE: cnt <= (cnt >= 8'd50) ? 8'd0 : cnt + 8'd1;
+                default: cnt <= 8'd0;
+            endcase
+        end
+    end
+
+    // LCD control signal
+    always @(posedge clk or negedge rst) begin
+        if (!rst) begin
+            {LCD_RS, LCD_RW, LCD_DATA} <= 10'b0_0_0000_0001;
+        end else begin
+            case (state)
+                FUNCTION_SET: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b0_0_0011_1000;
+                DISP_ONOFF: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b0_0_0000_1100;
+                ENTRY_MODE: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b0_0_0000_0110;
+                SET_ADDRESS: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b0_0_1000_0000;
+                DELAY_T: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b0_0_0000_1100;
+                
+                WRITE: begin
+                    case (cnt)
+                        // 첫째 줄: 모드 상태나 도시 이름 표시
+                        8'd0: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b0_0_1000_0000; // 첫째 줄 시작
+                        
+                        // 모드별 이름 출력
+                        8'd1, 8'd2, 8'd3, 8'd4, 8'd5, 8'd6, 8'd7, 8'd8, 8'd9, 8'd10, 8'd11, 8'd12: begin
+                            case (mode)
+                                MODE_NORMAL: begin // CLOCK
+                                    case (cnt)
+                                        8'd1: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_0011; // C
+                                        8'd2: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_1100; // L
+                                        8'd3: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_1111; // O
+                                        8'd4: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_0011; // C
+                                        8'd5: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_1011; // K
+                                        default: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0010_0000; // 공백
+                                    endcase
+                                end
+                                
+                                MODE_SET_HOUR: begin // SET HOUR
+                                    case (cnt)
+                                        8'd1: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0101_0011; // S
+                                        8'd2: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_0101; // E
+                                        8'd3: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0101_0100; // T
+                                        8'd4: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0010_0000; // 공백
+                                        8'd5: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_1000; // H
+                                        8'd6: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_1111; // O
+                                        8'd7: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0101_0101; // U
+                                        8'd8: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0101_0010; // R
+                                        default: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0010_0000;
+                                    endcase
+                                end
+                                
+                                MODE_SET_MIN: begin // SET MIN
+                                    case (cnt)
+                                        8'd1: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0101_0011; // S
+                                        8'd2: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_0101; // E
+                                        8'd3: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0101_0100; // T
+                                        8'd4: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0010_0000; // 공백
+                                        8'd5: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_1101; // M
+                                        8'd6: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_1001; // I
+                                        8'd7: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_1110; // N
+                                        default: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0010_0000;
+                                    endcase
+                                end
+                                
+                                MODE_SET_ZONE: begin // 도시 이름 표시
+                                    case (city_code)
+                                        4'd0: begin // SEOUL
+                                            case (cnt)
+                                                8'd1: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0101_0011; // S
+                                                8'd2: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_0101; // E
+                                                8'd3: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_1111; // O
+                                                8'd4: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0101_0101; // U
+                                                8'd5: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_1100; // L
+                                                default: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0010_0000;
+                                            endcase
+                                        end
+                                        4'd1: begin // TOKYO
+                                            case (cnt)
+                                                8'd1: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0101_0100; // T
+                                                8'd2: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_1111; // O
+                                                8'd3: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_1011; // K
+                                                8'd4: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0101_1001; // Y
+                                                8'd5: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_1111; // O
+                                                default: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0010_0000;
+                                            endcase
+                                        end
+                                        4'd2: begin // BEIJING
+                                            case (cnt)
+                                                8'd1: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_0010; // B
+                                                8'd2: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_0101; // E
+                                                8'd3: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_1001; // I
+                                                8'd4: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_1010; // J
+                                                8'd5: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_1001; // I
+                                                8'd6: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_1110; // N
+                                                8'd7: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_0111; // G
+                                                default: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0010_0000;
+                                            endcase
+                                        end
+                                        4'd3: begin // BANGKOK
+                                            case (cnt)
+                                                8'd1: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_0010; // B
+                                                8'd2: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_0001; // A
+                                                8'd3: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_1110; // N
+                                                8'd4: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_0111; // G
+                                                8'd5: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_1011; // K
+                                                8'd6: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_1111; // O
+                                                8'd7: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_1011; // K
+                                                default: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0010_0000;
+                                            endcase
+                                        end
+                                        4'd4: begin // DUBAI
+                                            case (cnt)
+                                                8'd1: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_0100; // D
+                                                8'd2: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0101_0101; // U
+                                                8'd3: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_0010; // B
+                                                8'd4: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_0001; // A
+                                                8'd5: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_1001; // I
+                                                default: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0010_0000;
+                                            endcase
+                                        end
+                                        4'd5: begin // MOSCOW
+                                            case (cnt)
+                                                8'd1: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_1101; // M
+                                                8'd2: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_1111; // O
+                                                8'd3: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0101_0011; // S
+                                                8'd4: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_0011; // C
+                                                8'd5: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_1111; // O
+                                                8'd6: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0101_0111; // W
+                                                default: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0010_0000;
+                                            endcase
+                                        end
+                                        4'd6: begin // LONDON
+                                            case (cnt)
+                                                8'd1: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_1100; // L
+                                                8'd2: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_1111; // O
+                                                8'd3: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_1110; // N
+                                                8'd4: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_0100; // D
+                                                8'd5: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_1111; // O
+                                                8'd6: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_1110; // N
+                                                default: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0010_0000;
+                                            endcase
+                                        end
+                                        4'd7: begin // PARIS
+                                            case (cnt)
+                                                8'd1: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0101_0000; // P
+                                                8'd2: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_0001; // A
+                                                8'd3: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0101_0010; // R
+                                                8'd4: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_1001; // I
+                                                8'd5: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0101_0011; // S
+                                                default: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0010_0000;
+                                            endcase
+                                        end
+                                        4'd8: begin // NEW YORK
+                                            case (cnt)
+                                                8'd1: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_1110; // N
+                                                8'd2: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_0101; // E
+                                                8'd3: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0101_0111; // W
+                                                8'd4: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0010_0000; // 공백
+                                                8'd5: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0101_1001; // Y
+                                                8'd6: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_1111; // O
+                                                8'd7: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0101_0010; // R
+                                                8'd8: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_1011; // K
+                                                default: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0010_0000;
+                                            endcase
+                                        end
+                                        4'd9: begin // LOS ANGELES
+                                            case (cnt)
+                                                8'd1: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_1100; // L
+                                                8'd2: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_1111; // O
+                                                8'd3: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0101_0011; // S
+                                                8'd4: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0010_0000; // 공백
+                                                8'd5: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_0001; // A
+                                                8'd6: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_1110; // N
+                                                8'd7: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_0111; // G
+                                                8'd8: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_0101; // E
+                                                8'd9: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_1100; // L
+                                                8'd10: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_0101; // E
+                                                8'd11: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0101_0011; // S
+                                                default: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0010_0000;
+                                            endcase
+                                        end
+                                        4'd10: begin // SYDNEY
+                                            case (cnt)
+                                                8'd1: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0101_0011; // S
+                                                8'd2: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0101_1001; // Y
+                                                8'd3: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_0100; // D
+                                                8'd4: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_1110; // N
+                                                8'd5: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_0101; // E
+                                                8'd6: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0101_1001; // Y
+                                                default: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0010_0000;
+                                            endcase
+                                        end
+                                        default: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0010_0000;
+                                    endcase
+                                end
+                                
+                                MODE_TIMER: begin // STOPWATCH
+                                    case (cnt)
+                                        8'd1: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0101_0011; // S
+                                        8'd2: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0101_0100; // T
+                                        8'd3: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_1111; // O
+                                        8'd4: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0101_0000; // P
+                                        8'd5: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0101_0111; // W
+                                        8'd6: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_0001; // A
+                                        8'd7: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0101_0100; // T
+                                        8'd8: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_0011; // C
+                                        8'd9: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_1000; // H
+                                        default: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0010_0000;
+                                    endcase
+                                end
+                                
+                                MODE_POMODORO: begin // POMODORO
+                                    case (cnt)
+                                        8'd1: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0101_0000; // P
+                                        8'd2: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_1111; // O
+                                        8'd3: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_1101; // M
+                                        8'd4: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_1111; // O
+                                        8'd5: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_0100; // D
+                                        8'd6: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_1111; // O
+                                        8'd7: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0101_0010; // R
+                                        8'd8: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_1111; // O
+                                        default: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0010_0000;
+                                    endcase
+                                end
+                                
+                                MODE_POMO_SET_WORK: begin // SET WORK
+                                    case (cnt)
+                                        8'd1: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0101_0011; // S
+                                        8'd2: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_0101; // E
+                                        8'd3: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0101_0100; // T
+                                        8'd4: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0010_0000; // 공백
+                                        8'd5: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0101_0111; // W
+                                        8'd6: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_1111; // O
+                                        8'd7: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0101_0010; // R
+                                        8'd8: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_1011; // K
+                                        default: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0010_0000;
+                                    endcase
+                                end
+                                
+                                MODE_POMO_SET_REST: begin // SET REST
+                                    case (cnt)
+                                        8'd1: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0101_0011; // S
+                                        8'd2: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_0101; // E
+                                        8'd3: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0101_0100; // T
+                                        8'd4: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0010_0000; // 공백
+                                        8'd5: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0101_0010; // R
+                                        8'd6: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0100_0101; // E
+                                        8'd7: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0101_0011; // S
+                                        8'd8: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0101_0100; // T
+                                        default: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0010_0000;
+                                    endcase
+                                end
+                                
+                                default: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0010_0000;
+                            endcase
+                        end
+                        
+                        // 둘째 줄: 날짜 표시
+                        8'd20: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b0_0_1100_0000; // 둘째 줄 시작
+                        
+                        // YYYY/MM/DD 형식으로 표시
+                        8'd21: {LCD_RS, LCD_RW, LCD_DATA} <= {2'b10, 4'b0011, year_thou}; // year의 천의 자리
+                        8'd22: {LCD_RS, LCD_RW, LCD_DATA} <= {2'b10, 4'b0011, year_hun};  // year의 백의 자리
+                        8'd23: {LCD_RS, LCD_RW, LCD_DATA} <= {2'b10, 4'b0011, year_ten};  // year의 십의 자리
+                        8'd24: {LCD_RS, LCD_RW, LCD_DATA} <= {2'b10, 4'b0011, year_one};  // year의 일의 자리
+                        8'd25: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0010_1111;           // /
+                        8'd26: {LCD_RS, LCD_RW, LCD_DATA} <= {2'b10, 4'b0011, month_ten}; // month의 십의 자리
+                        8'd27: {LCD_RS, LCD_RW, LCD_DATA} <= {2'b10, 4'b0011, month_one}; // month의 일의 자리
+                        8'd28: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b1_0_0010_1111;           // /
+                        8'd29: {LCD_RS, LCD_RW, LCD_DATA} <= {2'b10, 4'b0011, day_ten};   // day의 십의 자리
+                        8'd30: {LCD_RS, LCD_RW, LCD_DATA} <= {2'b10, 4'b0011, day_one};   // day의 일의 자리
+                        
+                        default: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b0_0_0000_1100;
+                    endcase
+                end
+                
+                default: {LCD_RS, LCD_RW, LCD_DATA} <= 10'b0_0_0000_1100;
+            endcase
+        end
+    end
+
+endmodule
+
+
+
+// ------------------------------------------------
+// 시계 module (top모듈)
+// ----------------------------------------------------
+module watch (
+    input clk_1mhz,             // 1 MHz 클록 입력 -> piezo로 뽀모도로의 알람 출력위해 1MHz로 설정
+                                //1Mhhz 클록을 1Khz 분주기 모듈에 연결해서 LCD나 다른 모듈 clk에 사용
+    input rst,
+    input btn_mode,             // 모드 전환 버튼
+    input btn_up,               // 값 증가 버튼
+    input btn_down,             // 값 감소 버튼
+    input btn_12_24,            // 12/24시간 모드 전환 버튼
+    
+    //타이머랑 관련된 신호
+    input btn_timer,            // 타이머 시작/정지 버튼
+    input btn_timer_reset,      // 타이머 리셋 버튼
+    
+    //뽀모도로랑 관련된 신호
+    input btn_pomodoro,                 // 뽀모도로 시작/정지 버튼
+    output reg [7:0] seg_data,          // 7-segment 데이터 출력 값
+    output reg [7:0] seg_com,           // 7-segment 어디 출력할지 정하는 값
+    output reg [7:0] led_pomodoro,      // 뽀모도로 LED 출력
+    output wire piezo,                  // Piezo 출력
+    
+    // LCD 출력이랑 관련된 신호
+    output wire lcd_e,
+    output wire lcd_rs,
+    output wire lcd_rw,
+    output wire [7:0] lcd_data
+);
+
+    
+    // 모드 값들
+    parameter MODE_NORMAL = 3'd0;       // 일반 시계 모드
+    parameter MODE_SET_HOUR = 3'd1;     // 시 설정 모드
+    parameter MODE_SET_MIN = 3'd2;      // 분 설정 모드
+    parameter MODE_SET_ZONE = 3'd3;     // 세계 시간의 나라 설정 모드
+    parameter MODE_TIMER = 3'd4;        // 타이머 모드
+    parameter MODE_POMODORO = 3'd5;     // 뽀모도로 모드
+    parameter MODE_POMO_SET_WORK = 3'd6; // 뽀모도로 공부시간 설정
+    parameter MODE_POMO_SET_REST = 3'd7; // 뽀모도로 휴식시간 설정
+    
+    
+    // 도시 index 정의
+    parameter CITY_SEOUL = 4'd0;        // UTC+9
+    parameter CITY_TOKYO = 4'd1;        // UTC+9
+    parameter CITY_BEIJING = 4'd2;      // UTC+8
+    parameter CITY_BANGKOK = 4'd3;      // UTC+7
+    parameter CITY_DUBAI = 4'd4;        // UTC+4
+    parameter CITY_MOSCOW = 4'd5;       // UTC+3
+    parameter CITY_LONDON  = 4'd6;      // UTC+0
+    parameter CITY_PARIS  = 4'd7;       // UTC+1
+    parameter CITY_NYC = 4'd8;          // UTC-5
+    parameter CITY_LA = 4'd9;           // UTC-8
+    parameter CITY_SYDNEY = 4'd10;      // UTC+10 (써머타임 미적용한 값)
+    parameter CITY_MAX = 4'd10;
+    
+    //1MHz를 1kHz로 만들어주는 분주기
+    reg [9:0] div_cnt;                  // 0~499 카운터 (1MHz/1000 = 1kHz이니까 0~499값 필요함)
+    reg clk_1khz;                       // 분주된 1kHz 클럭
+    
+    always @(posedge clk_1mhz or posedge rst) begin
+        if (rst) begin
+            div_cnt <= 10'd0;
+            clk_1khz <= 1'b0;
+        end
+        else begin
+            if (div_cnt >= 10'd499) begin
+                div_cnt <= 10'd0;
+                clk_1khz <= ~clk_1khz;
+            end
+            else
+                div_cnt <= div_cnt + 10'd1;
+        end
+    end
+    
+    // 내부 신호
+    reg [9:0] h_cnt;                    // 0~999까지 증가하는 카운터
+    reg [4:0] hour;                     // 시 (0~23)
+    reg [5:0] minute;                   // 분 (0~59)
+    reg [5:0] second;                   // 초 (0~59)
+    
+    // 날짜
+    reg [11:0] year;                    // 년도
+    reg [4:0] month;                    // 월 (1~12)
+    reg [5:0] day;                      // 일 (1~31)
+    
+    reg [4:0] display_hour;             // 표시중인 시간
+    reg [3:0] h_ten, h_one;             // 시의 십의자리, 시의 일의자리
+    reg [3:0] m_ten, m_one;             // 분의 십의자리, 분의 일의자리
+    reg [3:0] s_ten, s_one;             // 초의 십의자리, 초의 일의자리
+    
+    wire [7:0] seg_h_ten, seg_h_one;    // segment에 표현될 시의 십의자리, 시의 일의자리
+    wire [7:0] seg_m_ten, seg_m_one;    // segment에 표현될 분의 십의자리, 분의 일의자리
+    wire [7:0] seg_s_ten, seg_s_one;    // segment에 표현될 초의 십의자리, 초의 일의자리
+    
+    reg [2:0] s_cnt;
+    reg [2:0] mode;
+    reg is_12hour_mode;                 //12시간 모드인지 확인하는 값
+    reg is_pm;                          //AM인지 PM인지 확인하는 값
+    
+    // 세계 시간대 관련 값들
+    reg [3:0] selected_city; //선택된 도시
+    reg signed [4:0] timezone_offset; //도시들의 offset값(sign값이어야 오류 없이 동작할 수 있어서 앞에 signed 붙임)
+    
+    wire tick_1s; // h_cnt를 통해 1초 단위의 신호를 발생하는 역할
+    
+    // button debouncing을 위한 값들
+    reg [15:0] btn_mode_cnt, btn_up_cnt, btn_down_cnt, btn_12_24_cnt;
+    reg [15:0] btn_timer_cnt, btn_timer_reset_cnt, btn_pomodoro_cnt;
+    reg btn_mode_prev, btn_up_prev, btn_down_prev, btn_12_24_prev;
+    reg btn_timer_prev, btn_timer_reset_prev, btn_pomodoro_prev;
+    wire btn_mode_pulse, btn_up_pulse, btn_down_pulse, btn_12_24_pulse;
+    wire btn_timer_pulse, btn_timer_reset_pulse, btn_pomodoro_pulse;
+    
+    // 깜빡임 효과용 -> 시,분 바꿀때 해당자리 깜빡임 
+    reg [9:0] blink_cnt;
+    wire blink_on;
+    
+    // AM/PM 표시용
+    reg [7:0] seg_am_pm;
+    
+    // 타이머 관련 값
+    reg timer_running;                  // 타이머 동작 표시중인걸 표현하기 위한 값
+    reg [5:0] timer_second;             // 초 (0~59)
+    reg [3:0] timer_ms_ten;             // ms 십의 자리 (0~9)
+    reg [3:0] timer_ms_one;             // ms 일의 자리 (0~9)
+    reg [3:0] timer_ms_sub;             // ms중에서 일의 자리 증가시키기 위한 카운터 값
+    
+    // 뽀모도로 관련 값
+    reg [5:0] pomo_work_min;            // 공부 시간 (분)
+    reg [5:0] pomo_rest_min;            // 휴식 시간 (분)
+    reg pomo_running;                    // 뽀모도로 실행 중나타내는 값
+    reg pomo_is_work;                    // 1: 공부시간, 0: 휴식시간
+    reg [5:0] pomo_current_min;          // 현재 남은 분
+    reg [5:0] pomo_current_sec;          // 현재 남은 초
+    reg [12:0] alarm_cnt;                 // 뽀모도로 알람 지속 시간 결정해주는 카운터
+    reg alarm_enable;                    // piezo 활성화 신호
+    
+
+    // 1초 감지 신호
+    assign tick_1s = (h_cnt == 10'd999);
+    assign blink_on = (blink_cnt < 10'd500);
+    
+    
+    
+    // 1초를 생성해주는 카운터
+    always @(posedge clk_1khz or posedge rst) begin
+        if (rst)
+            h_cnt <= 10'd0;
+        else if (h_cnt >= 10'd999)
+            h_cnt <= 10'd0;
+        else
+            h_cnt <= h_cnt + 10'd1;
+    end
+    
+    // 깜빡임 카운터
+    always @(posedge clk_1khz or posedge rst) begin
+        if (rst)
+            blink_cnt <= 10'd0;
+        else if (blink_cnt >= 10'd999)
+            blink_cnt <= 10'd0;
+        else
+            blink_cnt <= blink_cnt + 10'd1;
+    end
+    
+    
+    
+    // 버튼 디바운싱--------------------------
+    
+    // 모드 버튼
+    always @(posedge clk_1khz or posedge rst) begin
+        if (rst) begin
+            btn_mode_cnt <= 16'd0;
+            btn_mode_prev <= 1'b0;
+        end
+        else begin
+            if (btn_mode) begin
+                if (btn_mode_cnt < 16'd50)
+                    btn_mode_cnt <= btn_mode_cnt + 16'd1;
+            end
+            else
+                btn_mode_cnt <= 16'd0;
+            btn_mode_prev <= (btn_mode_cnt == 16'd50);
+        end
+    end
+    assign btn_mode_pulse = (btn_mode_cnt == 16'd50) && !btn_mode_prev;
+    
+    // UP 버튼
+    always @(posedge clk_1khz or posedge rst) begin
+        if (rst) begin
+            btn_up_cnt <= 16'd0;
+            btn_up_prev <= 1'b0;
+        end
+        else begin
+            if (btn_up) begin
+                if (btn_up_cnt < 16'd50)
+                    btn_up_cnt <= btn_up_cnt + 16'd1;
+            end
+            else
+                btn_up_cnt <= 16'd0;
+            btn_up_prev <= (btn_up_cnt == 16'd50);
+        end
+    end
+    assign btn_up_pulse = (btn_up_cnt == 16'd50) && !btn_up_prev;
+    
+    // DOWN 버튼
+    always @(posedge clk_1khz or posedge rst) begin
+        if (rst) begin
+            btn_down_cnt <= 16'd0;
+            btn_down_prev <= 1'b0;
+        end
+        else begin
+            if (btn_down) begin
+                if (btn_down_cnt < 16'd50)
+                    btn_down_cnt <= btn_down_cnt + 16'd1;
+            end
+            else
+                btn_down_cnt <= 16'd0;
+            btn_down_prev <= (btn_down_cnt == 16'd50);
+        end
+    end
+    assign btn_down_pulse = (btn_down_cnt == 16'd50) && !btn_down_prev;
+    
+    // 12/24 버튼
+    always @(posedge clk_1khz or posedge rst) begin
+        if (rst) begin
+            btn_12_24_cnt <= 16'd0;
+            btn_12_24_prev <= 1'b0;
+        end
+        else begin
+            if (btn_12_24) begin
+                if (btn_12_24_cnt < 16'd50)
+                    btn_12_24_cnt <= btn_12_24_cnt + 16'd1;
+            end
+            else
+                btn_12_24_cnt <= 16'd0;
+            btn_12_24_prev <= (btn_12_24_cnt == 16'd50);
+        end
+    end
+    assign btn_12_24_pulse = (btn_12_24_cnt == 16'd50) && !btn_12_24_prev;
+    
+    // 타이머 버튼
+    always @(posedge clk_1khz or posedge rst) begin
+        if (rst) begin
+            btn_timer_cnt <= 16'd0;
+            btn_timer_prev <= 1'b0;
+        end
+        else begin
+            if (btn_timer) begin
+                if (btn_timer_cnt < 16'd50)
+                    btn_timer_cnt <= btn_timer_cnt + 16'd1;
+            end
+            else
+                btn_timer_cnt <= 16'd0;
+            btn_timer_prev <= (btn_timer_cnt == 16'd50);
+        end
+    end
+    assign btn_timer_pulse = (btn_timer_cnt == 16'd50) && !btn_timer_prev;
+    
+    // 타이머 리셋 버튼
+    always @(posedge clk_1khz or posedge rst) begin
+        if (rst) begin
+            btn_timer_reset_cnt <= 16'd0;
+            btn_timer_reset_prev <= 1'b0;
+        end
+        else begin
+            if (btn_timer_reset) begin
+                if (btn_timer_reset_cnt < 16'd50)
+                    btn_timer_reset_cnt <= btn_timer_reset_cnt + 16'd1;
+            end
+            else
+                btn_timer_reset_cnt <= 16'd0;
+            btn_timer_reset_prev <= (btn_timer_reset_cnt == 16'd50);
+        end
+    end
+    assign btn_timer_reset_pulse = (btn_timer_reset_cnt == 16'd50) && !btn_timer_reset_prev;
+    
+    // 뽀모도로 버튼
+    always @(posedge clk_1khz or posedge rst) begin
+        if (rst) begin
+            btn_pomodoro_cnt <= 16'd0;
+            btn_pomodoro_prev <= 1'b0;
+        end
+        else begin
+            if (btn_pomodoro) begin
+                if (btn_pomodoro_cnt < 16'd50)
+                    btn_pomodoro_cnt <= btn_pomodoro_cnt + 16'd1;
+            end
+            else
+                btn_pomodoro_cnt <= 16'd0;
+            btn_pomodoro_prev <= (btn_pomodoro_cnt == 16'd50);
+        end
+    end
+    assign btn_pomodoro_pulse = (btn_pomodoro_cnt == 16'd50) && !btn_pomodoro_prev;
+    
+    //--------------------------
+    
+    
+    
+    // 모드 전환 (모드전환 버튼 눌러서 모드를 전환)--------------------------
+    always @(posedge clk_1khz or posedge rst) begin
+        if (rst)
+            mode <= MODE_NORMAL;
+        else if (btn_mode_pulse) begin
+            case (mode)
+                MODE_NORMAL: mode <= MODE_SET_HOUR;
+                MODE_SET_HOUR: mode <= MODE_SET_MIN;
+                MODE_SET_MIN: mode <= MODE_SET_ZONE;
+                MODE_SET_ZONE: mode <= MODE_TIMER;
+                MODE_TIMER: mode <= MODE_POMODORO;
+                MODE_POMODORO: mode <= MODE_POMO_SET_WORK;
+                MODE_POMO_SET_WORK: mode <= MODE_POMO_SET_REST;
+                MODE_POMO_SET_REST: mode <= MODE_NORMAL;
+                default: mode <= MODE_NORMAL;
+            endcase
+        end
+    end
+    //--------------------------
+    
+
+    // 12/24시간 모드 전환--------------------------
+    always @(posedge clk_1khz or posedge rst) begin
+        if (rst)
+            is_12hour_mode <= 1'b0;
+        else if (btn_12_24_pulse)
+            is_12hour_mode <= ~is_12hour_mode;
+    end
+    //--------------------------
+    
+    
+    // 입력된 연도와 월에 따라 그 달의 마지막 날짜(ex.28~31)를 반환하는 함수--------------------------
+    function [5:0] get_days_in_month;
+        input [4:0] mon;
+        input [11:0] yr;
+        reg is_leap;
+        begin
+            // 윤년 계산
+            is_leap = ((yr % 4 == 0) && (yr % 100 != 0)) || (yr % 400 == 0);
+            
+            case (mon)
+                5'd1, 5'd3, 5'd5, 5'd7, 5'd8, 5'd10, 5'd12: get_days_in_month = 6'd31;
+                5'd4, 5'd6, 5'd9, 5'd11: get_days_in_month = 6'd30;
+                5'd2: get_days_in_month = is_leap ? 6'd29 : 6'd28;
+                default: get_days_in_month = 6'd30;
+            endcase
+        end
+    endfunction
+    //--------------------------
+    
+    
+    
+    // 현재 mode에 따라 시/분/초, 날짜, 세계시간 도시(selected_city)를 관리하는 카운터 및 버튼입력에 의해 값을 변경하는 로직--------
+    always @(posedge clk_1khz or posedge rst) begin
+        if (rst) begin
+            second <= 6'd0;
+            minute <= 6'd0;
+            hour <= 5'd0;
+            year <= 12'd2025;
+            month <= 5'd12;
+            day <= 6'd1;
+            selected_city <= CITY_SEOUL;
+        end
+        else begin
+            case (mode)
+                MODE_NORMAL: begin
+                    if (tick_1s) begin
+                        if (second >= 6'd59) begin
+                            second <= 6'd0;
+                            if (minute >= 6'd59) begin
+                                minute <= 6'd0;
+                                if (hour >= 5'd23) begin
+                                    hour <= 5'd0;
+                                    // 날짜 증가
+                                    if (day >= get_days_in_month(month, year)) begin
+                                        day <= 6'd1;
+                                        if (month >= 5'd12) begin
+                                            month <= 5'd1;
+                                            year <= year + 12'd1;
+                                        end
+                                        else
+                                            month <= month + 5'd1;
+                                    end
+                                    else
+                                        day <= day + 6'd1;
+                                end
+                                else
+                                    hour <= hour + 5'd1;
+                            end
+                            else
+                                minute <= minute + 6'd1;
+                        end
+                        else
+                            second <= second + 6'd1;
+                    end
+                end
+                
+                MODE_SET_HOUR: begin
+                    if (btn_up_pulse) begin
+                        if (hour >= 5'd23) begin
+                            hour <= 5'd0;
+                            // 시간이 24시간에서 넘어가면 날짜가 하나 추가
+                            if (day >= get_days_in_month(month, year)) begin
+                                day <= 6'd1;
+                                if (month >= 5'd12) begin
+                                    month <= 5'd1;
+                                    year <= year + 12'd1;
+                                end
+                                else
+                                    month <= month + 5'd1;
+                            end
+                            else
+                                day <= day + 6'd1;
+                        end
+                        else
+                            hour <= hour + 5'd1;
+                    end
+                    else if (btn_down_pulse) begin
+                        if (hour == 5'd0) begin
+                            hour <= 5'd23;
+                            // 시간이 0시간에서 넘어가면 날짜가 하나 감소
+                            if (day <= 6'd1) begin
+                                if (month <= 5'd1) begin
+                                    month <= 5'd12;
+                                    year <= year - 12'd1;
+                                    day <= get_days_in_month(5'd12, year - 12'd1);
+                                end
+                                else begin
+                                    month <= month - 5'd1;
+                                    day <= get_days_in_month(month - 5'd1, year);
+                                end
+                            end
+                            else
+                                day <= day - 6'd1;
+                        end
+                        else
+                            hour <= hour - 5'd1;
+                    end
+                end
+                
+                MODE_SET_MIN: begin // Minute의 변화는 날짜 변화에 영향 x
+                    if (btn_up_pulse) begin
+                        second <= 6'd0;
+                        if (minute >= 6'd59)
+                            minute <= 6'd0;
+                        else
+                            minute <= minute + 6'd1;
+                    end
+                    else if (btn_down_pulse) begin
+                        second <= 6'd0;
+                        if (minute == 6'd0)
+                            minute <= 6'd59;
+                        else
+                            minute <= minute - 6'd1;
+                    end
+                end
+                
+                MODE_SET_ZONE: begin
+                    if (btn_up_pulse) begin
+                        if (selected_city >= CITY_MAX)
+                            selected_city <= 4'd0;
+                        else
+                            selected_city <= selected_city + 4'd1;
+                    end
+                    else if (btn_down_pulse) begin
+                        if (selected_city == 4'd0)
+                            selected_city <= CITY_MAX;
+                        else
+                            selected_city <= selected_city - 4'd1;
+                    end
+                end
+            endcase
+        end
+    end
+    //--------------------------
+    
+    
+    
+    // 타이머(스톱워치) 기능을 담당하는 로직--------------------------
+    always @(posedge clk_1khz or posedge rst) begin
+        if (rst) begin
+            timer_running <= 1'b0;  // 타이머가 동작중인걸 나타내는 변수
+            timer_second <= 6'd0;   // 타이머의 초를 저장하는 변수
+            timer_ms_ten <= 4'd0;   // 타이머의 ms의 십의 자리를 저장하는 변수
+            timer_ms_one <= 4'd0;   // 타이머의 ms의 일의 자리를 저장하는 변수
+            timer_ms_sub <= 4'd0;   // 타이머의 ms의 일의 자리를 계산하기 위한 변수
+        end
+        else begin
+            // 타이머 시작/정지
+            if (btn_timer_pulse && mode == MODE_TIMER)
+                timer_running <= ~timer_running;
+            
+            // 타이머 리셋
+            if (btn_timer_reset_pulse && mode == MODE_TIMER) begin
+                timer_second <= 6'd0;
+                timer_ms_ten <= 4'd0; 
+                timer_ms_one <= 4'd0;
+                timer_ms_sub <= 4'd0;
+                timer_running <= 1'b0;
+            end
+            
+            // 타이머 카운트 (1ms마다 증가, 10ms 단위로 표시)
+            if (timer_running && mode == MODE_TIMER) begin
+                if (timer_ms_sub >= 4'd9) begin
+                    timer_ms_sub <= 4'd0;
+                    // 10ms 경과 -> ms_one 증가
+                    if (timer_ms_one >= 4'd9) begin
+                        timer_ms_one <= 4'd0;
+                        // 100ms 경과 -> ms_ten 증가
+                        if (timer_ms_ten >= 4'd9) begin
+                            timer_ms_ten <= 4'd0;
+                            // 1초 경과 -> second 증가
+                            if (timer_second >= 6'd59)
+                                timer_second <= 6'd0;
+                            else
+                                timer_second <= timer_second + 6'd1;
+                        end
+                        else
+                            timer_ms_ten <= timer_ms_ten + 4'd1;
+                    end
+                    else
+                        timer_ms_one <= timer_ms_one + 4'd1;
+                end
+                else
+                    timer_ms_sub <= timer_ms_sub + 4'd1;
+            end
+        end
+    end
+    //--------------------------
+    
+    
+    
+    
+    // 뽀모도로 로직--------------------------
+    always @(posedge clk_1khz or posedge rst) begin
+        if (rst) begin
+            pomo_work_min <= 6'd25;      // 공부시간 기본 25분
+            pomo_rest_min <= 6'd5;       // 쉬는시간 기본 5분
+            pomo_running <= 1'b0;        // 뽀모도로가 실행중인지 아닌지
+            pomo_is_work <= 1'b1;        // 뽀모도로가 공부모드인지 휴식모드인지
+            pomo_current_min <= 6'd25;
+            pomo_current_sec <= 6'd0;
+            led_pomodoro <= 8'b0;
+            alarm_enable <= 1'b0;
+            alarm_cnt <= 13'd0;
+        end
+        else begin
+            // 알람 카운터(5초 동안 울림)
+            if (alarm_cnt > 13'd0) begin
+                alarm_cnt <= alarm_cnt - 13'd1;
+                if (alarm_cnt == 13'd1)
+                    alarm_enable <= 1'b0;
+            end
+            
+            case (mode)
+                MODE_POMO_SET_WORK: begin
+                    // 공부 시간 설정
+                    if (btn_up_pulse) begin
+                        if (pomo_work_min >= 6'd60)
+                            pomo_work_min <= 6'd1;
+                        else
+                            pomo_work_min <= pomo_work_min + 6'd1;
+                    end
+                    else if (btn_down_pulse) begin
+                        if (pomo_work_min <= 6'd1)
+                            pomo_work_min <= 6'd60;
+                        else
+                            pomo_work_min <= pomo_work_min - 6'd1;
+                    end
+                end
+                
+                MODE_POMO_SET_REST: begin
+                    // 휴식 시간 설정
+                    if (btn_up_pulse) begin
+                        if (pomo_rest_min >= 6'd60)
+                            pomo_rest_min <= 6'd1;
+                        else
+                            pomo_rest_min <= pomo_rest_min + 6'd1;
+                    end
+                    else if (btn_down_pulse) begin
+                        if (pomo_rest_min <= 6'd1)
+                            pomo_rest_min <= 6'd60;
+                        else
+                            pomo_rest_min <= pomo_rest_min - 6'd1;
+                    end
+                end
+                
+                MODE_POMODORO: begin
+                    // 뽀모도로 시작/정지
+                    if (btn_pomodoro_pulse) begin
+                        if (!pomo_running) begin                // pomo_running = 0이면, 현재 정지상태라는 것을 의미
+                            pomo_running <= 1'b1;               // 타이머 시작
+                            pomo_is_work <= 1'b1;               // 공부 모드부터 시작
+                            pomo_current_min <= pomo_work_min;  // pomo_current_min(현재 표시되는 시간)을 설정한 공부시간(pomo_work_min)으로 로드
+                            pomo_current_sec <= 6'd0;           // 초는 0으로 초기화
+                            led_pomodoro <= 8'b0;               // LED 끔
+                        end
+                        else begin
+                            pomo_running <= 1'b0;               // 타이머 일시정지
+                            led_pomodoro <= 8'b0;               // LED 끔
+                        end
+                    end
+                    
+                    // 뽀모도로 카운트다운
+                    if (pomo_running && tick_1s) begin
+                        if (pomo_current_sec == 6'd0) begin
+                            if (pomo_current_min == 6'd0) begin
+                                // 타이머 종료 -> 알람 울림
+                                alarm_enable <= 1'b1;
+                                alarm_cnt <= 13'd5000;  // 5초 동안 알람 (멜로디 재생)                               
+                                if (pomo_is_work) begin
+                                    // 공부 시간 끝 -> 휴식 시간 시작
+                                    pomo_is_work <= 1'b0;
+                                    pomo_current_min <= pomo_rest_min;
+                                    pomo_current_sec <= 6'd0;
+                                    led_pomodoro <= 8'b1;  // LED 켜기
+                                end
+                                else begin
+                                    // 휴식 시간 끝 -> 정지
+                                    pomo_running <= 1'b0;
+                                    led_pomodoro <= 8'b0;  // LED 끄기
+                                    pomo_is_work <= 1'b1;
+                                    pomo_current_min <= pomo_work_min;
+                                end
+                            end
+                            else begin
+                                pomo_current_min <= pomo_current_min - 6'd1;
+                                pomo_current_sec <= 6'd59;
+                            end
+                        end
+                        else begin
+                            pomo_current_sec <= pomo_current_sec - 6'd1;
+                        end
+                    end
+                end
+            endcase
+        end
+    end
+    //--------------------------
+    
+    
+    
+    // 세계시간대를 한국시간을 기준으로 한 오프셋 계산--------------------------
+    always @(*) begin
+        case (selected_city)
+            CITY_SEOUL: timezone_offset = 5'd0;
+            CITY_TOKYO: timezone_offset = 5'd0;
+            CITY_BEIJING: timezone_offset = -5'd1;
+            CITY_BANGKOK: timezone_offset = -5'd2;
+            CITY_DUBAI: timezone_offset = -5'd5;
+            CITY_MOSCOW: timezone_offset = -5'd6;
+            CITY_LONDON: timezone_offset = -5'd9;
+            CITY_PARIS: timezone_offset = -5'd8;
+            CITY_NYC: timezone_offset = -5'd14;
+            CITY_LA: timezone_offset = 5'd7;
+            CITY_SYDNEY: timezone_offset = 5'd1;
+            default: timezone_offset = 5'd0;
+        endcase
+    end
+    
+    
+    
+    //선택된 도시의 시차(timezone_offset)를 현재 시간에 기반한 세계시간을 계산하며, 12/24시 모드를변환하는 기능도 수행한다.--------------------------      
+    reg signed [5:0] temp_hour;
+    
+    always @(*) begin
+        // 시간대 오프셋 적용
+        temp_hour = $signed({1'b0, hour}) + $signed(timezone_offset);
+        //양수 signed값으로 맞추기 위해 $signed사용.
+        //[1'b0, hour}에서 1'b0이 붙는 이유는 timezone_offset과 비트폭을 맞춰주기 위해 붙여준 것.
+        
+        if (temp_hour < 0)
+            temp_hour = temp_hour + 6'd24;
+        else if (temp_hour >= 6'd24)
+            temp_hour = temp_hour - 6'd24;
+            
+        display_hour = temp_hour[4:0];
+        
+        // 12시간 모드 변환
+        if (is_12hour_mode) begin
+            if (display_hour == 5'd0) begin
+                display_hour = 5'd12;
+                is_pm = 1'b0;
+            end
+            else if (display_hour < 5'd12) begin
+                is_pm = 1'b0;
+            end
+            else if (display_hour == 5'd12) begin
+                is_pm = 1'b1;
+            end
+            else begin
+                display_hour = display_hour - 5'd12;
+                is_pm = 1'b1;
+            end
+        end
+        else begin
+            is_pm = 1'b0;
+        end
+    end
+    //--------------------------
+    
+    
+    // BCD 변환--------------------------
+    always @(*) begin
+        case (mode)
+            MODE_SET_ZONE: begin
+                h_ten = 4'd0;
+                h_one = 4'd0;
+                m_ten = selected_city / 10;
+                m_one = selected_city % 10;
+                s_ten = 4'd0;
+                s_one = 4'd0;
+            end
+            
+            MODE_TIMER: begin
+                // 초:ms로 표현됨
+                // 시자리에 초 표시되고, 분자리에 ms 표현됨
+                h_ten = timer_second / 10;
+                h_one = timer_second % 10;
+                m_ten = timer_ms_ten;
+                m_one = timer_ms_one;
+                s_ten = 4'd0;
+                s_one = 4'd0;
+            end
+            
+            MODE_POMODORO: begin
+                h_ten = 4'd0;
+                h_one = 4'd0;
+                m_ten = pomo_current_min / 10;
+                m_one = pomo_current_min % 10;
+                s_ten = pomo_current_sec / 10;
+                s_one = pomo_current_sec % 10;
+            end
+            
+            MODE_POMO_SET_WORK: begin
+                h_ten = 4'd0;
+                h_one = 4'd0;
+                m_ten = pomo_work_min / 10;
+                m_one = pomo_work_min % 10;
+                s_ten = 4'd0;
+                s_one = 4'd0;
+            end
+            
+            MODE_POMO_SET_REST: begin
+                h_ten = 4'd0;
+                h_one = 4'd0;
+                m_ten = pomo_rest_min / 10;
+                m_one = pomo_rest_min % 10;
+                s_ten = 4'd0;
+                s_one = 4'd0;
+            end
+            
+            default: begin
+                h_ten = display_hour / 10;
+                h_one = display_hour % 10;
+                m_ten = minute / 10;
+                m_one = minute % 10;
+                s_ten = second / 10;
+                s_one = second % 10;
+            end
+        endcase
+    end
+    //--------------------------
+    
+    
+    
+    // AM/PM 세그먼트 표시 로직--------------------------
+    always @(*) begin
+        if (is_12hour_mode && (mode == MODE_NORMAL || mode == MODE_SET_HOUR || mode == MODE_SET_MIN)) begin
+            if (is_pm)
+                seg_am_pm = 8'b1100_1110;  // PM=> segment에 P라고 표시됨
+            else
+                seg_am_pm = 8'b1110_1110;  // AM=> segment에 A라고 표시됨
+        end
+        else begin
+            seg_am_pm = 8'b0000_0000;
+        end
+    end
+    //--------------------------
+    
+    
+    
+    // BCD -> 7-Segment 표현하기 위한 module 연결--------------------------
+    seg_decoder u0 (.bcd(h_ten), .seg_data(seg_h_ten));
+    seg_decoder u1 (.bcd(h_one), .seg_data(seg_h_one));
+    seg_decoder u2 (.bcd(m_ten), .seg_data(seg_m_ten));
+    seg_decoder u3 (.bcd(m_one), .seg_data(seg_m_one));
+    seg_decoder u4 (.bcd(s_ten), .seg_data(seg_s_ten));
+    seg_decoder u5 (.bcd(s_one), .seg_data(seg_s_one));
+    //--------------------------
+    
+    
+    
+    // 7-Segment의 자리를 선택을 위한 카운터--------------------------
+    always @(posedge clk_1khz or posedge rst) begin
+        if (rst)
+            s_cnt <= 3'd0;
+        else if (s_cnt >= 3'd6)
+            s_cnt <= 3'd0;
+        else
+            s_cnt <= s_cnt + 3'd1;
+    end
+    //--------------------------
+    
+    
+    
+    // 7-Segment의 어떤자리에 어떤 문자 표시할지에 대한 로직--------------------------
+    //seg_com : 자리선택 위한 값
+    //seg_data : 7-Segment에 표시되는 값
+    
+    always @(posedge clk_1khz or posedge rst) begin
+        if (rst) begin
+            seg_com <= 8'b1111_1111;
+            seg_data <= 8'b0000_0000;
+        end
+        else begin
+            case (s_cnt)
+                3'd0: begin
+                    seg_com <= 8'b1111_1101;
+                    if (mode == MODE_SET_HOUR && !blink_on) // 시간 설정할 때 설정하는 자리의 숫자를 깜빡이기 위해
+                        seg_data <= 8'b0000_0000;
+                    else
+                        seg_data <= seg_h_ten;
+                end
+                3'd1: begin
+                    seg_com <= 8'b1111_1011;
+                    if (mode == MODE_SET_HOUR && !blink_on)
+                        seg_data <= 8'b0000_0000;
+                    else
+                        seg_data <= seg_h_one;
+                end
+                3'd2: begin
+                    seg_com <= 8'b1111_0111;
+                    if ((mode == MODE_SET_MIN || mode == MODE_POMO_SET_WORK || mode == MODE_POMO_SET_REST) && !blink_on)
+                        seg_data <= 8'b0000_0000;
+                    else
+                        seg_data <= seg_m_ten;
+                end
+                3'd3: begin
+                    seg_com <= 8'b1110_1111;
+                    if ((mode == MODE_SET_MIN || mode == MODE_POMO_SET_WORK || mode == MODE_POMO_SET_REST) && !blink_on)
+                        seg_data <= 8'b0000_0000;
+                    else
+                        seg_data <= seg_m_one;
+                end
+                3'd4: begin
+                    seg_com <= 8'b1101_1111;
+                    seg_data <= seg_s_ten;
+                end
+                3'd5: begin
+                    seg_com <= 8'b1011_1111;
+                    seg_data <= seg_s_one;
+                end
+                3'd6: begin
+                    seg_com <= 8'b0111_1111;
+                    seg_data <= seg_am_pm;
+                end
+                default: begin
+                    seg_com <= 8'b1111_1111;
+                    seg_data <= 8'b0000_0000;
+                end
+            endcase
+        end
+    end
+    //--------------------------
+    
+
+    // LCD controller 인스턴스--------------------------
+    city_date_lcd_controller lcd_ctrl (
+        .rst(~rst),
+        .clk(clk_1khz),
+        .mode(mode), 
+        .city_code(selected_city),
+        .year(year),
+        .month(month),
+        .day(day),
+        .LCD_E(lcd_e),
+        .LCD_RS(lcd_rs),
+        .LCD_RW(lcd_rw),
+        .LCD_DATA(lcd_data)
+    );
+    
+    
+    // Piezo 인스턴스 (1MHz 클럭 사용)--------------------------
+    piezo_alarm piezo_inst (
+        .clk_1mhz(clk_1mhz),
+        .rst(rst),
+        .enable(alarm_enable),
+        .piezo(piezo)
+    );
+
+endmodule
